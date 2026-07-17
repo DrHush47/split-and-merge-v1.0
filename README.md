@@ -1,53 +1,297 @@
-# Pipeline — конвейер редактуры + каскад фактчекинга
+# Split & Merge — анализ проекта
 
-Многоагентная система для редактуры научных текстов и верификации источников.
+> **Дата:** 2026-07-17
+> **Версия:** v2 (после полного аудита)
+> **Назначение:** ознакомительный документ для презентации проекта
 
-## Быстрый старт
+---
+
+## 1. О проекте (коротко)
+
+**Split & Merge** — это многоагентная система для двух задач:
+
+1. **Редактура научных текстов** — автоматическое приведение .docx-документов к требованиям ГОСТ и журнальным стандартам.
+2. **Веб-фактчекинг** — автоматическая проверка существования научных статей, DOI, URL через каскад из 8 инструментов.
+
+Проект построен по модели «разделяй и собирай» (split-and-merge): задачи распределяются между специализированными AI-агентами (программами с определённой ролью), а проверка фактов идёт по цепочке — от самого быстрого и бесплатного инструмента к более мощному.
+
+**Главный принцип:** «Доставить 90% результата за 30 минут лучше, чем 100% за 3 часа».
+
+---
+
+## 2. Структура проекта (все папки и файлы)
+
+```
+split-and-merge/
+│
+├── .agents/                          ← конфигурация AI-агента
+│   ├── mcp.json                      ← активный конфиг MCP-серверов (6 серверов)
+│   ├── mcp.json.example              ← шаблон для новых разработчиков
+│   └── skills/                       ← установленные навыки (расширения возможностей)
+│       ├── docx/                     ← навык работы с Word-документами
+│       ├── grill-me/                 ← навык аудита и поиска проблем
+│       └── grilling/                 ← навык стресс-тестирования решений
+│
+├── .github/workflows/
+│   └── ci.yml                        ← CI: валидация JSON, линтинг, проверка импортов
+│
+├── .editorconfig                     ← единые правила форматирования кода
+├── .gitignore                        ← исключения из git (ключи, venv, временные файлы)
+├── README.md                         ← витрина проекта, быстрый старт
+├── analysis.md                       ← этот документ
+├── skills-lock.json                  ← контрольные суммы установленных навыков
+│
+└── pipeline/                         ← ОСНОВНОЙ КОД ПРОЕКТА
+    │
+    ├── __init__.py                   ← делает pipeline Python-пакетом
+    ├── common.py                     ← общие утилиты для всех скриптов
+    ├── requirements.txt              ← Python-зависимости
+    ├── targets.json                  ← список URL для проверки (заполняется перед запуском)
+    ├── playwright.md                 ← референс Playwright MCP (Ур.2.5)
+    │
+    ├── docs/                         ← документация
+    │   ├── knowledge.md              ← главный cheatsheet: каскад фактчекинга
+    │   ├── docx-protocol.md          ← протокол правки .docx через python-docx
+    │   ├── architecture.md           ← архитектура конвейера (роли, этапы, принципы)
+    │   ├── notes.md                  ← идеи, MCP-серверы, инструменты, находки
+    │   └── results.md                ← отчёт факт-чекера (шаблон + данные тестового прогона)
+    │
+    ├── openalex/                     ← Ур.0.5: проверка DOI через OpenAlex API
+    │   ├── factcheck_openalex.py     ← скрипт-раннер
+    │   └── openalex.md               ← standalone-референс
+    │
+    ├── crawl4ai/                     ← Ур.2: базовый HTTP-парсинг
+    │   ├── factcheck_crawl4ai.py     ← скрипт-раннер
+    │   └── .venv/                    ← виртуальное окружение Python (общее для всех скриптов)
+    │
+    ├── scrapling/                    ← Ур.3: обход Cloudflare
+    │   ├── factcheck_scrapling.py    ← скрипт-раннер
+    │   └── scrapling.md              ← standalone-референс
+    │
+    └── firecrawl/                    ← Ур.4: платный резерв
+        ├── firecrawl.md              ← standalone-референс
+        └── .firecrawl/               ← выходные файлы (в .gitignore)
+```
+
+---
+
+## 3. Каскад веб-фактчекинга (8 уровней)
+
+Это центральный механизм проекта. Когда нужно проверить, существует ли научная статья по DOI или URL, система проходит по цепочке инструментов — от самого быстрого и бесплатного к более мощному:
+
+```
+Ур.0.5 → OpenAlex API          (мгновенная проверка DOI — бесплатно)
+Ур.1   → researcher-web        (поиск в интернете)
+Ур.2   → Crawl4AI              (базовый парсинг веб-страниц — бесплатно)
+Ур.2.5 → Playwright MCP        (интерактивный браузер: логин, формы — бесплатно)
+Ур.3   → Scrapling             (обход Cloudflare-защиты — бесплатно)
+Ур.4   → FireCrawl             (платный резерв — только если всё остальное не сработало)
+Ур.5   → Человек               (ручная проверка заблокированных URL)
+Ур.6   → Gemini DeepSearch     (опциональная глубокая аналитика)
+```
+
+**Принцип каскада:** цепочка последовательная — каждый следующий уровень вызывается только если предыдущий не справился. Это экономит время (быстрые инструменты — первыми) и деньги (платный FireCrawl — только в крайнем случае).
+
+**Результат тестового прогона (3 DOI):** 3/3 статей подтверждены. OpenAlex — мгновенно, Crawl4AI — все страницы загружены.
+
+---
+
+## 4. Python-скрипты: что, зачем, как запускать
+
+### 4.1 Общее виртуальное окружение
+
+Все скрипты используют **одно** виртуальное окружение:
+```
+pipeline/crawl4ai/.venv/Scripts/python.exe   (Windows)
+pipeline/crawl4ai/.venv/bin/python           (Linux/Mac)
+```
+
+Установка зависимостей:
+```bash
+./pipeline/crawl4ai/.venv/Scripts/python.exe -m pip install -r pipeline/requirements.txt
+```
+
+**Зависимости:** `crawl4ai` (парсинг), `scrapling[all]` (обход Cloudflare), `python-docx` (правка .docx).
+
+---
+
+### 4.2 `common.py` — общие утилиты
+
+**Функции:**
+
+| Функция | Что делает |
+|---------|-----------|
+| `fix_windows_console()` | Исправляет Unicode на Windows (чтобы кириллица не ломалась) |
+| `read_targets(path)` | Читает `targets.json`, проверяет что у каждого объекта есть `id`, `fact`, `url` |
+| `validate_prefix(prefix)` | Проверяет безопасность префикса для имён выходных файлов |
+
+---
+
+### 4.3 `openalex/factcheck_openalex.py` — Ур.0.5
+
+**Что делает:** проверяет DOI через OpenAlex REST API (бесплатный открытый индекс научных работ, CC0).
+
+**Как запустить:**
+```bash
+./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/openalex/factcheck_openalex.py \
+  --targets pipeline/targets.json --prefix oa --timeout 15
+```
+
+**Основные функции в коде:**
+
+| Функция | Что делает |
+|---------|-----------|
+| `extract_doi(target)` | Извлекает DOI из URL или поля expect цели |
+| `lookup_doi(doi, timeout, mailto)` | Запрашивает метаданные статьи через OpenAlex API |
+| `format_authors(data)` | Форматирует список авторов из ответа API |
+| `format_biblio(data)` | Форматирует библиографию (журнал, том, страницы, год) |
+| `_save_result(...)` | Сохраняет результат в `openalex/{prefix}_{id}.txt` |
+| `batch_lookup(targets, ...)` | Пакетная проверка всех DOI из targets.json |
+
+**Результат:** `CONFIRMED` (статья найдена) / `ERROR` (NOT_FOUND) / `SKIP` (нет DOI).
+
+---
+
+### 4.4 `crawl4ai/factcheck_crawl4ai.py` — Ур.2
+
+**Что делает:** парсит веб-страницы через Crawl4AI (асинхронный HTTP-парсинг с JS-рендерингом).
+
+**Как запустить:**
+```bash
+./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/crawl4ai/factcheck_crawl4ai.py \
+  --targets pipeline/targets.json --prefix crawl --timeout 45
+```
+
+**Доп. аргументы:** `--no-cache` (отключить кеш), `--js-code "..."` (внедрить JavaScript), `--session` (сохранять куки между URL).
+
+**Основные функции:**
+
+| Функция | Что делает |
+|---------|-----------|
+| `crawl_one(crawler, target, ...)` | Парсит один URL через Crawl4AI, извлекает markdown + ссылки |
+| `main_async(args)` | Асинхронный цикл: обходит все цели, сохраняет результаты |
+
+**Результат:** `OK` (страница загружена) / `EMPTY` (пусто) / `TIMEOUT` / `ERROR`.
+
+---
+
+### 4.5 `scrapling/factcheck_scrapling.py` — Ур.3
+
+**Что делает:** парсит веб-страницы с обходом защиты от ботов (Cloudflare Turnstile), используя скрытый браузер на Playwright.
+
+**Как запустить:**
+```bash
+./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/scrapling/factcheck_scrapling.py \
+  --targets pipeline/targets.json --prefix sc --timeout 90
+```
+
+**Доп. аргументы:** `--adaptive` (пере-парсинг при смене структуры сайта), `--css-selector` (конкретный селектор), `--no-cloudflare` (отключить обход Cloudflare для быстрых сайтов).
+
+**Основные функции:**
+
+| Функция | Что делает |
+|---------|-----------|
+| `extract_text(page)` | Безопасное извлечение текста: get_all_text → html_content → body.decode |
+| `_save_result(...)` | Сохраняет результат в `scrapling/{prefix}_{id}.txt` |
+| `crawl_batch(targets, ...)` | Пакетный парсинг: браузер открывается ОДИН раз на все URL (10-20× быстрее) |
+
+**Результат:** `OK` / `EMPTY` / `TIMEOUT` / `ERROR`. Поле `EXTRACTOR` показывает, каким методом извлечён текст.
+
+---
+
+### 4.6 `firecrawl` CLI — Ур.4 (резерв)
+
+**Что делает:** платный скрапинг страниц с гарантированным markdown-выводом. Используется только если Scrapling не справился.
 
 ```bash
-# 1. Настроить MCP-конфиг
-cp .agents/mcp.json.example .agents/mcp.json
-
-# 2. Установить зависимости
-./pipeline/crawl4ai/.venv/Scripts/python.exe -m pip install -r pipeline/requirements.txt
-
-# 3. Заполнить targets.json ссылками для проверки
-# 4. Запустить каскад фактчекинга
-
-# OpenAlex (Ур.0.5 — проверка DOI):
-./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/openalex/factcheck_openalex.py --targets pipeline/targets.json --prefix oa --timeout 15
-
-# Crawl4AI (Ур.2 — базовый парсинг):
-./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/crawl4ai/factcheck_crawl4ai.py --targets pipeline/targets.json --prefix crawl --timeout 45
-
-# Scrapling (Ур.3 — обход Cloudflare):
-./pipeline/crawl4ai/.venv/Scripts/python.exe pipeline/scrapling/factcheck_scrapling.py --targets pipeline/targets.json --prefix sc --timeout 90
-
-# FireCrawl (Ур.4 — платный резерв):
 firecrawl scrape 'https://...' -o pipeline/firecrawl/.firecrawl/<name>.md
+firecrawl credit-usage    # проверка остатка кредитов
 ```
 
-> Для Linux/Mac заменить `Scripts` на `bin` в путях к Python.
+**Установлен:** v1.19.26, 95% кредитов.
 
-## Документация
+---
 
-| Файл | Назначение |
-|------|-----------|
-| [`docs/knowledge.md`](pipeline/docs/knowledge.md) | Каскад веб-фактчекинга — 8 уровней, техконстанты, команды запуска |
-| [`docs/docx-protocol.md`](pipeline/docs/docx-protocol.md) | Протокол правки .docx — правила, шаблоны, антипаттерны |
-| [`docs/architecture.md`](pipeline/docs/architecture.md) | Архитектура конвейера — роли, этапы, принципы |
-| [`docs/notes.md`](pipeline/docs/notes.md) | Идеи, находки, MCP-серверы, инструменты |
+## 5. MCP-серверы (6 штук)
 
-## Структура проекта
+**MCP** (Model Context Protocol) — стандартный протокол для подключения внешних инструментов (браузер, поиск, файлы) к AI-агенту. Как USB для программ: единый разъём для любых инструментов. Все серверы централизованно описаны в `.agents/mcp.json`:
 
-```
-pipeline/
-├── docs/                  ← Документация
-├── crawl4ai/              ← Crawl4AI (Ур.2: базовый HTTP-парсинг)
-├── openalex/              ← OpenAlex API (Ур.0.5: валидация DOI)
-├── scrapling/             ← Scrapling (Ур.3: обход Cloudflare)
-├── firecrawl/             ← FireCrawl (Ур.4: платный резерв)
-├── common.py              ← Общие утилиты (prefix-валидация, чтение targets)
-├── requirements.txt       ← Python-зависимости
-└── targets.json           ← Цели для проверки (заполняется перед запуском)
-```
+| Сервер | Роль | Стоимость |
+|--------|------|-----------|
+| **Context7** | Живая документация библиотек (без галлюцинаций API) | Бесплатно |
+| **Playwright** | Интерактивный браузер (логин, формы, скриншоты) | Бесплатно |
+| **Fetch** | Получение веб-контента | Бесплатно |
+| **Filesystem** | Файловые операции | Бесплатно |
+| **E2B** | Изолированная облачная microVM для запуска кода | Бесплатный тир |
+| **Exa** | Семантический AI-поиск | Бесплатный тир |
+
+Шаблон для новых разработчиков: `.agents/mcp.json.example` → скопировать в `.agents/mcp.json`, заполнить ключи.
+
+---
+
+## 6. Протокол правки .docx (кратко)
+
+Для редактирования Word-документов используется **python-docx** — Python-библиотека, которая в 1500 раз быстрее альтернатив.
+
+**Базовый сценарий:**
+1. Прочитать документ (количество параграфов, таблиц, структура)
+2. Составить список правок (поля, шрифты, заголовки, нумерация)
+3. Запустить — ~0.01 секунды на типовую задачу форматирования (мгновенно для компьютера, не для человека)
+
+**Типичные операции:** поля страницы, шрифты, интервалы, заголовки, нумерация списков, вставка текстовых фрагментов.
+
+Полный протокол — в [`pipeline/docs/docx-protocol.md`](pipeline/docs/docx-protocol.md) (627 строк: правила, шаблоны кода, антипаттерны, эмпирические данные).
+
+---
+
+## 7. Роли в конвейере (архитектура)
+
+Конвейер редактуры построен по модели 5 ролей:
+
+| Роль | Кто | Что делает |
+|------|-----|-----------|
+| **Оркестратор** | Человек или LLM | Декомпозиция задачи, маршрутизация, контроль |
+| **Рецензент** | LLM + python-docx | Критический разбор, программная вычитка, оценка 0–10 |
+| **Текстовик** | LLM | Генерация текстовых фрагментов `[TEXT-N]` по ТЗ |
+| **Технический исполнитель** | LLM + python-docx | Механические правки в .docx по чек-листу |
+| **Факт-чекер** | FreeBuff + OpenAlex + Crawl4AI + Playwright + Scrapling | 100% проверка фактов и библиографии |
+
+Подробнее — [`pipeline/docs/architecture.md`](pipeline/docs/architecture.md).
+
+---
+
+## 8. CI/CD
+
+При каждом пуше в `main` GitHub Actions автоматически:
+1. Валидирует JSON конфига MCP
+2. Устанавливает Python-зависимости
+3. Прогоняет линтер (ruff)
+4. Проверяет что все скрипты импортируются без ошибок
+
+Конфиг: `.github/workflows/ci.yml`.
+
+---
+
+## 9. Технический стек
+
+| Компонент | Технология |
+|-----------|-----------|
+| Язык | Python 3.11+ |
+| Веб-парсинг | Crawl4AI, Scrapling (Playwright), FireCrawl |
+| API | OpenAlex (REST, CC0) |
+| .docx (Word) | python-docx |
+| MCP | Context7, Playwright, Fetch, Filesystem, E2B, Exa |
+| CI/CD | GitHub Actions + ruff |
+| Окружение | Windows (основное), Linux/Mac (поддерживается) |
+
+---
+
+## 10. Результаты тестового прогона
+
+| DOI | Статья | OpenAlex | Crawl4AI |
+|-----|--------|----------|----------|
+| 10.1038/s41591-018-0300-7 | Topol — Nature Medicine 2019 | CONFIRMED | OK (2165 симв.) |
+| 10.1136/bmj.n71 | PRISMA 2020 — BMJ 2021 | CONFIRMED | OK (782 симв.) |
+| 10.1126/science.aax2342 | Obermeyer — Science 2019 | CONFIRMED | OK (2163 симв.) |
+
+**Итог:** 3/3 статей подтверждены. Каскад работает без сбоев. Бесплатные инструменты (OpenAlex + Crawl4AI) покрыли все цели — FireCrawl не понадобился.
